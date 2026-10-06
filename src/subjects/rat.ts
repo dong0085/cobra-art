@@ -155,8 +155,8 @@ export const rat: Subject = {
   look: {
     spot: [700, 600],
     keyPool: [560, 320, 1000],
-    eye: [566, 262, 34],
-    snout: [790, 388],
+    eye: [568, 268, 36],
+    snout: [782, 380],
     fade: null,
     ground: [430, 1505, 520, 40],
     pattern: { kind: 'belly', zone: [600, 900, 320] },

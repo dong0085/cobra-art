@@ -1,51 +1,65 @@
 // Rat: the fur is drawn with open strokes, so flood fill alone leaks into the background.
-// Instead: close the outline, lift the whiskers out as their own lines, split the body
-// with hand-placed part shapes, and add soft "volumes" that shape the body in 3D.
+// Two images go in:
+//   reference/rat-lineart.png  – the line work
+//   reference/rat-parts.png    – the same drawing with each body part filled in its own flat colour
+// The part map gives the silhouette and says which part every pixel belongs to (skin, fur, eye, nose);
+// each fur part (head, arms, haunches) becomes a soft 3D bulge.
+// The drawing has no whiskers, so they are generated from the snout.
 import { absorbUnlabeled, countAreas, inkMask, labelComponents, morph, removeSpecks } from './raster.ts';
-import { buildRegions, inkPath, insidePolygon, loadPng, polygonPath, pts, writeArt, type AreaStats } from './output.ts';
-import type { Pt } from './contour.ts';
+import { buildRegions, inkPath, loadPng, writeArt, type AreaStats } from './output.ts';
+import { simplifyLoop, smoothPath, traceLoops, type Pt } from './contour.ts';
 
 const SOURCE = 'reference/rat-lineart.png';
+const PART_MAP = 'reference/rat-parts.png';
 const INK_THRESHOLD = 170;
 const MIN_REGION = 20;
 const MIN_SPECK = 12;
-const OPEN_RADIUS = 4; // px; strokes thinner than this stick out of the body and get cut off as "loose" ink
-const WHISKER_MIN_LENGTH = 30; // px
-const WHISKER_REACH = 330; // px from the snout
+const COLOR_TOLERANCE = 70; // how far (RGB distance) a map pixel may be from its part colour
+const MIN_PART = 150; // px; smaller pieces of a part colour are blends at a junction, not a real part
 
-// Hand-placed landmarks for reference/rat-lineart.png (1024 × 1536).
-const SNOUT = { x: 790, y: 388 };
-const EYE = { x: 566, y: 262, r: 42 };
-const NOSE = { x: 788, y: 382, r: 26 };
-const TAIL_HOLE = { x: 880, y: 1300 }; // background showing through the curl of the tail
-
-/** Bare skin: ears, paws, feet, tail. */
-const SKIN = {
-  earLeft: pts(232, 110, 250, 45, 300, 16, 370, 18, 422, 55, 446, 110, 432, 170, 400, 215, 362, 250, 330, 266, 285, 248, 250, 210, 234, 160),
-  earRight: pts(545, 100, 566, 42, 606, 12, 656, 16, 690, 55, 694, 115, 682, 160, 662, 188, 620, 160, 580, 130),
-  pawLeft: pts(402, 930, 445, 915, 482, 930, 498, 965, 492, 1020, 460, 1026, 428, 994, 404, 952),
-  pawRight: pts(500, 915, 540, 890, 582, 885, 590, 910, 568, 955, 532, 980, 500, 980, 494, 945),
-  footLeft: pts(36, 1452, 68, 1402, 150, 1382, 240, 1372, 330, 1382, 334, 1422, 252, 1442, 182, 1454, 132, 1470, 58, 1474),
-  footRight: pts(512, 1420, 558, 1366, 622, 1372, 664, 1428, 706, 1480, 694, 1520, 600, 1524, 528, 1502, 506, 1460),
-  tail: pts(812, 1120, 882, 1136, 962, 1186, 1010, 1258, 1006, 1352, 964, 1426, 882, 1462, 760, 1466, 696, 1460, 690, 1398, 760, 1398, 858, 1402, 926, 1358, 956, 1290, 926, 1222, 860, 1182, 812, 1178),
-};
-const PAWS = [SKIN.pawLeft, SKIN.pawRight, SKIN.footLeft, SKIN.footRight];
-
-/** Soft volumes added on top of the inflated silhouette (lift: how much they stand out; negative flattens). */
-const VOLUMES: { lift: number; poly: Pt[] }[] = [
-  { lift: 0.35, poly: pts(330, 250, 440, 120, 560, 100, 680, 175, 760, 290, 815, 370, 800, 430, 740, 475, 640, 500, 540, 480, 430, 430, 340, 350) },
-  { lift: 0.55, poly: pts(300, 720, 380, 690, 440, 760, 470, 850, 495, 960, 470, 1020, 420, 990, 380, 900, 320, 820) },
-  { lift: 0.55, poly: pts(560, 700, 640, 690, 680, 760, 640, 850, 590, 920, 530, 975, 500, 950, 520, 860, 545, 780) },
-  { lift: 0.4, poly: pts(500, 1050, 600, 980, 720, 990, 800, 1080, 820, 1200, 790, 1320, 700, 1380, 580, 1370, 500, 1290, 470, 1170) },
-  { lift: 0.25, poly: SKIN.footLeft },
-  { lift: 0.25, poly: SKIN.footRight },
-  { lift: -0.65, poly: SKIN.earLeft },
-  { lift: -0.65, poly: SKIN.earRight },
+/**
+ * The colours of the part map. `kind`: the block kind. `lift`: how much the part bulges out of the body
+ * (negative flattens or cups it); 0 adds no volume.
+ */
+const PARTS: { name: string; color: string; kind: string; lift: number }[] = [
+  { name: 'body', color: '#00ff00', kind: 'fur', lift: 0 },
+  { name: 'head', color: '#ff0000', kind: 'fur', lift: 0.35 },
+  { name: 'arm left', color: '#0000ff', kind: 'fur', lift: 0.5 },
+  { name: 'arm right', color: '#ffff00', kind: 'fur', lift: 0.5 },
+  { name: 'haunch left', color: '#ff00ff', kind: 'fur', lift: 0.35 },
+  { name: 'haunch right', color: '#00ffff', kind: 'fur', lift: 0.45 },
+  { name: 'paw left', color: '#8a4404', kind: 'skin', lift: 0.25 },
+  { name: 'paw right', color: '#828204', kind: 'skin', lift: 0.25 },
+  { name: 'foot left', color: '#048484', kind: 'skin', lift: 0.2 },
+  { name: 'foot right', color: '#940444', kind: 'skin', lift: 0.2 },
+  { name: 'tail', color: '#7cfc04', kind: 'skin', lift: 0 },
+  { name: 'ear left', color: '#fc7c04', kind: 'skin', lift: -0.6 },
+  { name: 'ear left inside', color: '#fc74b4', kind: 'skin', lift: -0.35 },
+  { name: 'ear right', color: '#7404fc', kind: 'skin', lift: -0.6 },
+  { name: 'ear right inside', color: '#bc80fc', kind: 'skin', lift: -0.35 },
+  { name: 'eye', color: '#444444', kind: 'eye', lift: 0 },
+  { name: 'nose', color: '#040494', kind: 'nose', lift: 0 },
 ];
+/** Ears are flattened as a whole (outside + inside together), then the inside is cupped. */
+const EAR_GROUPS = [
+  ['ear left', 'ear left inside'],
+  ['ear right', 'ear right inside'],
+];
+const PAWS = ['paw left', 'paw right', 'foot left', 'foot right'];
 
-const near = (p: Pt, c: { x: number; y: number; r: number }) => Math.hypot(p.x - c.x, p.y - c.y) < c.r;
+/** Generated whiskers (art units of reference/rat-lineart.png, 1024 × 1536): roots spread over the muzzle, fanning out to the right with a slight droop. */
+const WHISKERS = {
+  count: 16,
+  roots: { x: 760, y: 392, spreadX: 26, spreadY: 20 },
+  angles: [-0.55, 0.75], // radians from horizontal (y down): up-right … down-right
+  length: [170, 320],
+  droop: 0.22, // how much each whisker curves down along its length
+  seed: 7,
+};
 
 const { raster: r, rgba } = loadPng(SOURCE);
+const { raster: mapRaster, rgba: mapRgba } = loadPng(PART_MAP);
+if (mapRaster.width !== r.width || mapRaster.height !== r.height) throw new Error(`${PART_MAP} must be ${r.width}×${r.height}`);
 const W = r.width;
 const N = W * r.height;
 
@@ -53,35 +67,77 @@ const N = W * r.height;
 const ink = inkMask(rgba, r, INK_THRESHOLD);
 removeSpecks(ink, r, MIN_SPECK);
 
-// 2. Close the outline: with the lines 1 px thicker, the background no longer leaks into the body.
-const thick = morph(ink, r, 1);
-const fill = labelComponents(thick, r, 0);
-const bgLabels = new Set([0, W - 1, N - W, N - 1, TAIL_HOLE.y * W + TAIL_HOLE.x].map((i) => fill.labels[i]));
-const solid = new Uint8Array(N);
-for (let i = 0; i < N; i++) solid[i] = bgLabels.has(fill.labels[i]) ? 0 : 1;
-
-// 3. Whiskers: thin ink that an opening (shrink, then grow) cuts off the body, near the snout.
-const opened = morph(morph(solid, r, OPEN_RADIUS, true), r, OPEN_RADIUS);
-const core = largestComponent(opened);
-const loose = new Uint8Array(N);
-for (let i = 0; i < N; i++) loose[i] = ink[i] && !core[i] ? 1 : 0;
-const pieces = labelComponents(loose, r, 1);
-const whiskerPx = new Uint8Array(N);
-const whiskers: Pt[][] = [];
-for (const piece of groupPixels(pieces.labels, pieces.count)) {
-  const polyline = whiskerPolyline(piece);
-  if (!polyline) continue;
-  whiskers.push(polyline);
-  for (const i of piece) whiskerPx[i] = 1;
+// 2. Part map → a part number per pixel (-1: background, -2: unsure, filled in below).
+const partColors = PARTS.map((p) => [1, 3, 5].map((k) => parseInt(p.color.slice(k, k + 2), 16)));
+const partOf = new Int32Array(N);
+for (let i = 0; i < N; i++) {
+  const c = [mapRgba[i * 4], mapRgba[i * 4 + 1], mapRgba[i * 4 + 2]];
+  const dWhite = Math.hypot(255 - c[0], 255 - c[1], 255 - c[2]);
+  let best = -1;
+  let bestD = dWhite;
+  partColors.forEach((pc, n) => {
+    const d = Math.hypot(c[0] - pc[0], c[1] - pc[1], c[2] - pc[2]);
+    if (d < bestD) [best, bestD] = [n, d];
+  });
+  partOf[i] = best >= 0 && bestD > COLOR_TOLERANCE ? -2 : best; // blended edge colours are unsure
+}
+// Soft edges between two parts blend into a third part's colour (blue + green ≈ teal), so trust a
+// pixel only when its neighbours 1–2 px away agree; the rest is filled in from both sides below.
+{
+  const H = r.height;
+  const sure = partOf.slice();
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const p = partOf[i];
+      if (p < 0) continue;
+      for (const [dx, dy] of [[1, 0], [2, 0], [-1, 0], [-2, 0], [0, 1], [0, 2], [0, -1], [0, -2]]) {
+        const xx = Math.min(W - 1, Math.max(0, x + dx));
+        const yy = Math.min(H - 1, Math.max(0, y + dy));
+        const q = partOf[yy * W + xx];
+        if (q !== p && q !== -1) {
+          sure[i] = -2;
+          break;
+        }
+      }
+    }
+  }
+  partOf.set(sure);
+  // Where three parts meet, a blend can form a small blob of a fourth colour: drop pieces under MIN_PART px.
+  const seen = new Uint8Array(N);
+  for (let start = 0; start < N; start++) {
+    if (partOf[start] < 0 || seen[start]) continue;
+    const p = partOf[start];
+    const piece = [start];
+    seen[start] = 1;
+    for (let k = 0; k < piece.length; k++) {
+      const i = piece[k];
+      const x = i % W;
+      for (const n of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i - W, i + W]) {
+        if (n < 0 || n >= N || seen[n] || partOf[n] !== p) continue;
+        seen[n] = 1;
+        piece.push(n);
+      }
+    }
+    if (piece.length < MIN_PART) for (const i of piece) partOf[i] = -2;
+  }
 }
 
-// 4. The body: everything inside the outline except the whiskers (fur tufts stay attached).
-const whiskerHalo = morph(whiskerPx, r, 2);
-const bodyRaw = new Uint8Array(N);
-for (let i = 0; i < N; i++) bodyRaw[i] = solid[i] && !whiskerHalo[i] ? 1 : 0;
-const body = largestComponent(bodyRaw);
+// 3. The body: everything painted in the part map, plus the line work along its edge.
+//    (The outline itself has gaps, so it can't be closed by flood fill alone.)
+const painted = new Uint8Array(N);
+for (let i = 0; i < N; i++) painted[i] = partOf[i] === -1 ? 0 : 1;
+const nearPaint = morph(painted, r, 3);
+const solid = new Uint8Array(N);
+for (let i = 0; i < N; i++) solid[i] = painted[i] || (ink[i] && nearPaint[i]) ? 1 : 0;
+const body = largestComponent(solid);
 
-// 5. Areas between strokes, inside the body; the ink is shared out between them.
+// 4. Every body pixel gets a part: unsure or unpainted ones take the nearest painted part.
+for (let i = 0; i < N; i++) if (!body[i]) partOf[i] = -3;
+else if (partOf[i] === -1) partOf[i] = -2;
+spreadInto(partOf, -2);
+
+// 5. Areas between strokes, cut along part edges, so each block lies in one part.
 const gaps = new Uint8Array(N);
 for (let i = 0; i < N; i++) gaps[i] = body[i] && !ink[i] ? 1 : 0;
 const { labels, count } = labelComponents(gaps, r, 1);
@@ -91,42 +147,50 @@ for (let i = 0; i < N; i++) {
   else if (labels[i] >= 0 && areas[labels[i]] < MIN_REGION) labels[i] = -1;
 }
 absorbUnlabeled(labels, r);
-
-// 6. Cut the areas along the skin shapes, so ears, paws, feet and tail become their own blocks.
-const skinPolys = Object.values(SKIN);
-const NOSE_PART = skinPolys.length + 1;
 const split = new Map<number, number>();
-const partOf = new Map<number, number>();
-for (let y = 0; y < r.height; y++) {
-  for (let x = 0; x < W; x++) {
-    const i = y * W + x;
-    if (labels[i] < 0) continue;
-    const p = { x: x + 0.5, y: y + 0.5 };
-    const part = near(p, NOSE) ? NOSE_PART : skinPolys.findIndex((poly) => insidePolygon(p, poly)) + 1;
-    const key = labels[i] * 16 + part;
-    let next = split.get(key);
-    if (next === undefined) split.set(key, (next = split.size));
-    partOf.set(next, part);
-    labels[i] = next;
-  }
+const blockPart = new Map<number, number>();
+for (let i = 0; i < N; i++) {
+  if (labels[i] < 0) continue;
+  const key = labels[i] * 64 + partOf[i];
+  let next = split.get(key);
+  if (next === undefined) split.set(key, (next = split.size));
+  blockPart.set(next, partOf[i]);
+  labels[i] = next;
 }
 
-function classify({ label, area, box, center }: AreaStats): string {
-  const part = partOf.get(label)!;
-  if (part === NOSE_PART) return 'nose';
-  if (near(center, EYE)) return 'eye';
+function classify({ label, area, box }: AreaStats): string {
+  const part = PARTS[blockPart.get(label)!];
   const long = Math.max(box.x1 - box.x0, box.y1 - box.y0) / Math.max(1, Math.min(box.x1 - box.x0, box.y1 - box.y0));
-  if (area < 300 && long >= 1.3 && PAWS.some((poly) => insidePolygon(center, poly))) return 'claw';
-  return part > 0 ? 'skin' : 'fur';
+  if (PAWS.includes(part.name) && area < 300 && long >= 1.3) return 'claw'; // small closed shapes at the tips of toes
+  return part.kind;
 }
 const regions = buildRegions(labels, r, classify);
 
-// 7. Line work inside the body only (whiskers and stray marks outside are handled separately).
+// 6. Volumes: each part's outline, with its lift. Ears are flattened whole, then cupped inside.
+const volumes: string[] = [];
+const addVolume = (names: string[], lift: number) => {
+  const ids = names.map((n) => PARTS.findIndex((p) => p.name === n));
+  const mask = new Uint8Array(N);
+  for (let i = 0; i < N; i++) mask[i] = ids.includes(partOf[i]) ? 1 : 0;
+  const loops = traceLoops({ x0: 0, y0: 0, x1: W, y1: r.height }, (x, y) => x >= 0 && y >= 0 && x < W && y < r.height && mask[y * W + x] === 1);
+  const big = loops.filter((loop) => loop.length > 40);
+  if (big.length) volumes.push(`<path class="volume" data-lift="${lift}" d="${big.map((loop) => smoothPath(simplifyLoop(loop, 1.5))).join('')}"/>`);
+};
+for (const part of PARTS) if (part.lift > 0) addVolume([part.name], part.lift);
+for (const group of EAR_GROUPS) {
+  addVolume(group, PARTS.find((p) => p.name === group[0])!.lift);
+  addVolume([group[1]], PARTS.find((p) => p.name === group[1])!.lift);
+}
+
+// 7. Whiskers.
+const whiskers = makeWhiskers();
+
+// 8. Line work inside the body only.
 const bodyInk = new Uint8Array(N);
 for (let i = 0; i < N; i++) bodyInk[i] = ink[i] && body[i] ? 1 : 0;
 
 const extra =
-  VOLUMES.map((v) => `<path class="volume" data-lift="${v.lift}" d="${polygonPath(v.poly)}"/>`).join('\n') +
+  volumes.join('\n') +
   '\n' +
   whiskers.map((w) => `<path class="whisker" d="M${w.map((p) => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join('L')}"/>`).join('\n') +
   '\n';
@@ -141,7 +205,7 @@ writeArt({
   form: 'inflate',
   colors: { fur: '#c8b6a6', skin: '#f4a7a0', eye: '#264653', nose: '#e76f51', claw: '#e9c46a' },
 });
-console.log(`${whiskers.length} whiskers, ${VOLUMES.length} volumes`);
+console.log(`${whiskers.length} whiskers, ${volumes.length} volumes`);
 
 // ---------- helpers ----------
 
@@ -154,35 +218,51 @@ function largestComponent(mask: Uint8Array): Uint8Array {
   return out;
 }
 
-function groupPixels(lab: Int32Array, n: number): number[][] {
-  const groups: number[][] = Array.from({ length: n }, () => []);
-  for (let i = 0; i < N; i++) if (lab[i] >= 0) groups[lab[i]].push(i);
-  return groups;
+/** Replaces every `unknown` value with the nearest known (≥ 0) neighbour's value. */
+function spreadInto(values: Int32Array, unknown: number) {
+  let frontier: number[] = [];
+  for (let i = 0; i < N; i++) if (values[i] >= 0) frontier.push(i);
+  while (frontier.length) {
+    const next: number[] = [];
+    for (const i of frontier) {
+      const x = i % W;
+      for (const n of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i - W, i + W]) {
+        if (n < 0 || n >= N || values[n] !== unknown) continue;
+        values[n] = values[i];
+        next.push(n);
+      }
+    }
+    frontier = next;
+  }
 }
 
-/** A whisker piece → points from root to tip, or null if the piece isn't a whisker. */
-function whiskerPolyline(piece: number[]): Pt[] | null {
-  const dist = (i: number) => Math.hypot((i % W) - SNOUT.x, Math.floor(i / W) - SNOUT.y);
-  let near0 = Infinity;
-  let far = 0;
-  for (const i of piece) {
-    const d = dist(i);
-    near0 = Math.min(near0, d);
-    far = Math.max(far, d);
+function makeWhiskers(): Pt[][] {
+  let s = WHISKERS.seed;
+  const rand = () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 2 ** 32;
+  };
+  const { roots, angles, length, droop, count } = WHISKERS;
+  const out: Pt[][] = [];
+  for (let k = 0; k < count; k++) {
+    const f = (k + 0.5) / count;
+    // Upper whiskers grow from higher on the muzzle.
+    const root = {
+      x: roots.x + (rand() - 0.5) * roots.spreadX,
+      y: roots.y + (f - 0.5) * roots.spreadY * 2 + (rand() - 0.5) * 6,
+    };
+    const angle = angles[0] + (angles[1] - angles[0]) * f + (rand() - 0.5) * 0.12;
+    const len = length[0] + (length[1] - length[0]) * (0.4 + 0.6 * Math.sin(Math.PI * f)) * (0.85 + rand() * 0.3);
+    const bend = droop * (0.7 + rand() * 0.6);
+    const line: Pt[] = [];
+    for (let j = 0; j <= 24; j++) {
+      const t = j / 24;
+      const a = angle + bend * t; // turns downward along the way (y down)
+      const prev = line[line.length - 1] ?? root;
+      const step = len / 24;
+      line.push(j === 0 ? root : { x: prev.x + Math.cos(a) * step, y: prev.y + Math.sin(a) * step });
+    }
+    out.push(line);
   }
-  if (near0 > WHISKER_REACH || far - near0 < WHISKER_MIN_LENGTH) return null;
-  // Whiskers fan out from the snout: average the pixels in rings of growing distance.
-  const STEP = 6;
-  const rings = new Map<number, { x: number; y: number; n: number }>();
-  for (const i of piece) {
-    const k = Math.floor((dist(i) - near0) / STEP);
-    const ring = rings.get(k) ?? { x: 0, y: 0, n: 0 };
-    ring.x += i % W;
-    ring.y += Math.floor(i / W);
-    ring.n++;
-    rings.set(k, ring);
-  }
-  return [...rings.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, ring]) => ({ x: ring.x / ring.n + 0.5, y: ring.y / ring.n + 0.5 }));
+  return out;
 }

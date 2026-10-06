@@ -37,7 +37,7 @@ export type Subject = {
     ground: [number, number, number, number] | null;
     /** How the second colour is used: the cobra's cross bands, or a lighter belly inside a circle. */
     pattern: { kind: 'bands' } | { kind: 'belly'; zone: Circle };
-    /** Bevel and dome on every block (scales), or only on small ones (eye, nose, claws). */
+    /** Bevel and dome on every block (scales), or only on bare parts (skin, eye, nose, claws). */
     bevelAll: boolean;
     /** Depth of the baked hair strands (art units); 0 for no fur. */
     strandDepth: number;

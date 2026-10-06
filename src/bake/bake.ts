@@ -93,6 +93,33 @@ function fillUnknown(ids: Int32Array, width: number) {
   }
 }
 
+/**
+ * Smoothed outlines of neighbouring blocks can leave hairline gaps that read as background inside the body.
+ * Marks small enclosed background specks as unknown (-1) so fillUnknown closes them. Large openings
+ * (the space inside a curled tail) and the background around the animal stay as they are.
+ */
+function fillPinholes(ids: Int32Array, width: number, height: number, maxArea = 64) {
+  const seen = new Uint8Array(ids.length);
+  for (let start = 0; start < ids.length; start++) {
+    if (ids[start] !== 0 || seen[start]) continue;
+    const piece = [start];
+    seen[start] = 1;
+    let touchesEdge = false;
+    for (let k = 0; k < piece.length && piece.length <= maxArea; k++) {
+      const i = piece[k];
+      const x = i % width;
+      const y = (i - x) / width;
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) touchesEdge = true;
+      for (const n of [x > 0 ? i - 1 : -1, x < width - 1 ? i + 1 : -1, y > 0 ? i - width : -1, y < height - 1 ? i + width : -1]) {
+        if (n < 0 || seen[n] || ids[n] !== 0) continue;
+        seen[n] = 1;
+        piece.push(n);
+      }
+    }
+    if (!touchesEdge && piece.length <= maxArea) for (const i of piece) ids[i] = -1;
+  }
+}
+
 /** Marks pixels on either side of a boundary where `differs(a, b)` is true. */
 function boundary(idOf: Int32Array, width: number, height: number, differs: (a: number, b: number) => boolean) {
   const edge = new Uint8Array(width * height);
@@ -133,6 +160,7 @@ export function bake(art: Art, makeCanvas: MakeCanvas): Baked {
     const key = (rgba[i * 4] << 16) | (rgba[i * 4 + 1] << 8) | rgba[i * 4 + 2];
     idOf[i] = colorToId.get(key) ?? -1; // -1: blended edge pixel, fixed below
   }
+  fillPinholes(idOf, width, height);
   fillUnknown(idOf, width);
 
   const ids = new Uint8Array(width * height * 4);

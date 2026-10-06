@@ -5,7 +5,7 @@ Animals lit like sculptures in a dark studio. Each line drawing is traced into S
 There are two animals, and each one needs a different approach:
 
 - **King cobra**: every scale in the drawing is a closed shape, so every scale becomes its own block with a bevel and a dome.
-- **Rat**: the fur is drawn with open strokes. The outline is closed and inflated into one soft body. Fine hair strands follow the direction of the pen strokes, and the whiskers are lifted out as separate lines that move.
+- **Rat**: the fur is drawn with open strokes, so a second image, a body-part map, says where each part is. The body is inflated into one soft shape, with extra bulges for the head, arms and haunches. Fine hair strands follow the direction of the pen strokes, and generated whiskers move on their own.
 
 | King cobra (`?animal=cobra`, default) | Rat (`?animal=rat`) |
 | --- | --- |
@@ -64,6 +64,15 @@ npm run snap -- "http://localhost:5173/?show&t=90" shot.png 1600 900   # headles
 
 The trace also writes `out/<animal>-preview.svg`, with each kind of block in its own colour (plus the rat's whiskers and volumes).
 
+## Drawing a new animal
+
+Two images at the same size (1024×1536 works with the current layout), both PNG:
+
+1. **Line art** (`reference/<animal>-lineart.png`): pure black lines on pure white, steady line weight (2–4 px), no grey shading, hatching, frame or text. Draw fur strokes in the direction the hair grows and avoid crosshatching. Draw a closed line around anything that should look different (eye, nose, claws, the rings of a tail). Leave out the whiskers; they are generated.
+2. **Body-part map** (`reference/<animal>-parts.png`): the same drawing with each part filled in one flat colour on white: head, body, each arm, each haunch, paws, feet, tail, each ear (outside and inside), eyes, nose. Where parts overlap, paint the part in front. Soft edges are fine; the tracer cleans up blended colours.
+
+The colours, what each part is made of (fur or skin), and how much each part bulges are listed at the top of `scripts/trace/rat.ts`.
+
 ## Timelapse video
 
 With `npm run dev` running, and with ffmpeg installed:
@@ -101,9 +110,9 @@ URL options: `?animal=cobra|rat`, `?show` (start without HUD), `?t=600` (start 1
 ## How it looks
 
 - **Shape, cobra**: each body part is a rounded column. Each scale has a bevelled rim and a gentle dome, and the gaps between scales are grooves.
-- **Shape, rat**: the closed outline is inflated like a balloon (wide parts bulge, thin parts like the tail stay low). Soft extra bulges shape the head, arms and haunch, and the ears are flattened. Fine hair strands are drawn along the pen strokes (line integral convolution), and the strokes themselves become shallow grooves.
+- **Shape, rat**: the painted silhouette is inflated like a balloon (wide parts bulge, thin parts like the tail stay low). Each part from the map adds a soft bulge (head, arms, haunches, paws, feet); the ears are flattened and cupped. Bare parts (ears, paws, feet, tail rings) get a bevel like the cobra's scales. Fine hair strands are drawn along the pen strokes (line integral convolution), and the strokes themselves become shallow grooves.
 - **Light**: a warm key light from the upper left, aimed at the head, plus a cool rim light from behind. Shading uses GGX highlights and studio softbox reflections. Fur uses a Kajiya–Kay sheen that stretches across the hairs. The surface casts short shadows on itself. Gaps get ambient occlusion and their own "cavity" colour.
-- **Whiskers**: drawn as thin strips over the scene. They drift slowly, sway in a gust, and twitch about 5 times a second during 胡须抖动.
+- **Whiskers**: generated from the snout and drawn as thin strips over the scene. They drift slowly, sway in a gust, and twitch about 5 times a second during 胡须抖动.
 - **Studio**: a mottled painted backdrop with a soft spotlight. The animal throws its shadow on it, and the rat has a soft contact shadow on the floor. A faint cone of light carries drifting dust. The cobra's cut-off body at the lower left sinks into the dark.
 
 ## An hour without repeats
@@ -117,7 +126,7 @@ URL options: `?animal=cobra|rat`, `?show` (start without HUD), `?t=600` (start 1
 
 ## Code map
 
-- `scripts/trace.ts`: picks the animal. `scripts/trace/cobra.ts` and `scripts/trace/rat.ts` hold each animal's steps and hand-placed landmarks. `scripts/trace/output.ts` and `raster.ts` are the shared steps: ink mask, flood fill, outlines, and writing the SVG.
+- `scripts/trace.ts`: picks the animal. `scripts/trace/cobra.ts` and `scripts/trace/rat.ts` hold each animal's steps and hand-placed landmarks. `scripts/trace/output.ts`, `raster.ts` and `contour.ts` are the shared steps: ink mask, flood fill, outlines, and writing the SVG.
 - `src/art/*.svg`: geometry and data only. Regions (`<path class="region fur|skin|scale|…">`), one ink path, and for the rat, volumes and whisker lines.
 - `src/subjects/`: one file per animal, holding its art, materials, layout, landmarks and events.
 - `src/bake/`: runs once at load in a Web Worker. `bake.ts` draws an id map at 2×, distance maps, per-block data and the body height. `form.ts` handles balloon inflation, stroke direction and hair strands.
@@ -128,4 +137,5 @@ URL options: `?animal=cobra|rat`, `?show` (start without HUD), `?t=600` (start 1
 ## Reference
 
 - `reference/cobra-lineart.png`, `reference/rat-lineart.png`: the line art that gets traced
+- `reference/rat-parts.png`: the rat's body-part map
 - `reference/cobra-painting.png`: pose and composition reference for the cobra

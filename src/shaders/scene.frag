@@ -140,8 +140,8 @@ float heightAt(vec2 p, bool detail) {
   // The body's overall shape, baked: rounded columns (cobra) or a soft inflated balloon (rat).
   float h = texture(uForm, p / uArtSize).r;
 
-  // Each block: a rounded bevel at its rim plus a gentle dome (scales; on furry animals only small hard parts).
-  if (uBevelAll > 0.5 || kind == EYE || kind == NOSE || kind == CLAW) {
+  // Each block: a rounded bevel at its rim plus a gentle dome (scales; on furry animals only the bare parts).
+  if (uBevelAll > 0.5 || kind == EYE || kind == NOSE || kind == CLAW || kind == SKIN) {
     float dist = blockDistance(p);
     float maxD = max(region(id, 1).x / uBakeScale, 0.5);
     float b = clamp(dist / uBevel, 0.0, 1.0);
