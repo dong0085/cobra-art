@@ -1,0 +1,24 @@
+{
+  "name": "cobra-art",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "trace": "node scripts/trace.ts",
+    "snap": "node scripts/snap.ts",
+    "timelapse": "node scripts/timelapse.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pngjs": "^6.0.5",
+    "pngjs": "^7.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  },
+  "dependencies": {
+    "lil-gui": "^0.21.0"
+  }
+}

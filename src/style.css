@@ -1,0 +1,77 @@
+:root {
+  font-family: system-ui, -apple-system, 'PingFang SC', sans-serif;
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0907;
+}
+
+#canvas,
+#fallback {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+/* ---------- HUD ---------- */
+
+.hud {
+  position: fixed;
+  left: 16px;
+  bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 12px;
+  color: #e9dccb;
+  text-shadow: 0 1px 2px #000;
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.hud .keys {
+  opacity: 0.6;
+}
+
+.show .hud {
+  display: none;
+}
+
+.show.idle,
+.show.idle canvas {
+  cursor: none;
+}
+
+/* ---------- Static fallback (no WebGL2) ---------- */
+
+#fallback {
+  background: radial-gradient(circle at 70% 35%, #4a3a2c, #0b0907 70%);
+}
+
+#fallback svg {
+  height: 100%;
+  width: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+#fallback .region {
+  fill: #2f3220;
+}
+
+#fallback .ventral {
+  fill: #a8925e;
+}
+
+#fallback .eye {
+  fill: #b8802c;
+}
+
+#fallback .ink {
+  fill: #0b0907;
+}
