@@ -1,4 +1,4 @@
-// Without WebGL2: show the traced SVG with flat king cobra colours.
+// Without WebGL2: show the traced SVG in flat colours (the stylesheet colours each kind of block).
 export function showFallback(svgText: string, reason: string) {
   const box = document.querySelector<HTMLElement>('#fallback')!;
   box.innerHTML = svgText;

@@ -1,7 +1,7 @@
 // Show mode: full screen, no UI, cursor hidden while idle. Keyboard shortcuts.
 import type GUI from 'lil-gui';
 import type { Params } from '../params.ts';
-import { EVENT_TYPES, type Director } from '../director/director.ts';
+import type { Director } from '../director/director.ts';
 
 const IDLE_MS = 2500;
 
@@ -38,7 +38,7 @@ export function setupShowMode(params: Params, director: Director, panel: GUI, no
       params.paused = !params.paused;
       e.preventDefault();
     } else if (key === 'm') director.skipMood(now());
-    else if (key === 'e') director.trigger(EVENT_TYPES[Math.floor(Math.random() * EVENT_TYPES.length)], now());
+    else if (key === 'e') director.trigger(director.eventTypes[Math.floor(Math.random() * director.eventTypes.length)], now());
     else if (key === 'escape') setShow(false);
   });
   document.querySelector('#canvas')?.addEventListener('dblclick', toggleFullscreen);

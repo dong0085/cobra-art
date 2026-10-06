@@ -1,6 +1,7 @@
 // Turns the SVG blocks into the textures the shaders read. Runs once at page load (in a worker when possible).
-import { KINDS, type Art } from '../art/load.ts';
+import { MATERIALS, type Art } from '../art/load.ts';
 import { distanceTransform } from './distance.ts';
+import { hairStrands, inflate, strokeFlow } from './form.ts';
 
 /** Texture pixels per art unit. */
 export const BAKE_SCALE = 2;
@@ -12,6 +13,14 @@ export const SILHOUETTE_LEVELS = 1;
 export const REGION_ROWS = 3;
 /** How far (art units) neighbouring blocks share their stroke direction. */
 const FLOW_RADIUS = 45;
+/** "columns" form: how wide each body part's rounded edge is (art units), and how tall it gets. */
+const FORM_RADIUS = 46;
+const FORM_HEIGHT = 0.75;
+/** "inflate" form: height relative to the balloon's round cross-section. */
+const INFLATE_HEIGHT = 0.55;
+/** Fur direction map: art units per pixel, and how far it is smoothed. */
+const FLOW_CELL = 2;
+const FLOW_SMOOTH = 34;
 
 export type Baked = {
   width: number;
@@ -36,9 +45,17 @@ export type Baked = {
    */
   regionData: Float32Array;
   regionCount: number;
+  /** R32F → R16F, art width × height. Height of the body's overall shape, in art units. */
+  form: Float32Array;
+  /** R8, strandsSize. Fine hair strands (128 = flat). 1 × 1 when the subject has no fur. */
+  strands: Uint8Array;
+  strandsSize: [number, number];
+  /** RGBA8, flowSize. Stroke direction as (cos 2θ, sin 2θ) in RG, coherence in B. 1 × 1 when unused. */
+  flow: Uint8Array;
+  flowSize: [number, number];
 };
 
-/** Body parts that each get their own rounded form. 0 = background. */
+/** Cobra body parts that each get their own rounded form (others: one part). 0 = background. */
 const PARTS: Record<string, number> = { scale: 1, ventral: 2, head: 3, eye: 3, nostril: 3 };
 
 type Canvas2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -142,7 +159,7 @@ export function bake(art: Art, makeCanvas: MakeCanvas): Baked {
 
   // 4. Signed form distance: shadows, glow, and each body part's overall roundness.
   const partOf = new Int8Array(count + 1);
-  art.regions.forEach((region, n) => (partOf[n + 1] = PARTS[region.kind]));
+  art.regions.forEach((region, n) => (partOf[n + 1] = PARTS[region.kind] ?? 1));
   const outline = distanceTransform(boundary(idOf, width, height, (a, b) => partOf[a] !== partOf[b]), width, height);
   const silhouette = new Uint8Array(width * height);
   for (let i = 0; i < outline.length; i++) {
@@ -211,13 +228,121 @@ export function bake(art: Art, makeCanvas: MakeCanvas): Baked {
   art.regions.forEach((region, n) => {
     const id = n + 1;
     const seed = (Math.imul(id, 747796405) >>> 0) / 2 ** 32;
-    regionData.set([region.cx / art.width, region.cy / art.height, KINDS.indexOf(region.kind), seed], row(0, id));
+    regionData.set([region.cx / art.width, region.cy / art.height, MATERIALS[region.kind], seed], row(0, id));
     regionData.set([maxDist[id], axis[id], region.order, area[id]], row(1, id));
     regionData.set([flow[id], elongation[id], 0, 0], row(2, id));
   });
   regionData.set([0.5, 0.5, -1, 0], row(0, 0)); // background
 
-  return { width, height, ids, ink, distance, silhouette, regionData, regionCount: count };
+  // 7. The body's overall 3D shape, one value per art pixel.
+  const W = art.width;
+  const H = art.height;
+  const inside = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) inside[y * W + x] = idOf[(y * BAKE_SCALE + 1) * width + x * BAKE_SCALE + 1] !== 0 ? 1 : 0;
+  let form: Float32Array;
+  let strands: Uint8Array = new Uint8Array([128]);
+  let strandsSize: [number, number] = [1, 1];
+  let flowTex: Uint8Array = new Uint8Array([128, 128, 0, 255]);
+  let flowSize: [number, number] = [1, 1];
+
+  if (art.form === 'columns') {
+    // Each part is a rounded column: steep at its edge, flat across the middle.
+    form = new Float32Array(W * H);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        let d = 0;
+        for (let j = 0; j < BAKE_SCALE; j++) for (let i = 0; i < BAKE_SCALE; i++) {
+          const k = (y * BAKE_SCALE + j) * width + x * BAKE_SCALE + i;
+          d += idOf[k] === 0 ? 0 : outline[k];
+        }
+        const t = Math.min(d / (BAKE_SCALE * BAKE_SCALE) / BAKE_SCALE / FORM_RADIUS, 1);
+        form[y * W + x] = Math.sqrt(1 - (1 - t) * (1 - t)) * FORM_RADIUS * FORM_HEIGHT;
+      }
+    }
+  } else {
+    // One soft balloon for the whole body, plus extra bulges (arms, haunch) and flattened areas (ears).
+    form = inflate(inside, W, H);
+    for (let i = 0; i < form.length; i++) form[i] *= INFLATE_HEIGHT;
+    for (const volume of art.volumes) addVolume(form, inside, volume, ctx, W, H);
+
+    // Fur: which way the strokes run, and fine strands drawn along them.
+    const flow = strokeFlow(ink, width, height, BAKE_SCALE, FLOW_CELL, FLOW_SMOOTH);
+    flowSize = [flow.width, flow.height];
+    flowTex = new Uint8Array(flow.width * flow.height * 4);
+    for (let i = 0; i < flow.width * flow.height; i++) {
+      const c2 = flow.dx[i] * flow.dx[i] - flow.dy[i] * flow.dy[i]; // cos 2θ
+      const s2 = 2 * flow.dx[i] * flow.dy[i]; // sin 2θ
+      flowTex.set([Math.round((c2 * 0.5 + 0.5) * 255), Math.round((s2 * 0.5 + 0.5) * 255), Math.round(flow.coherence[i] * 255), 255], i * 4);
+    }
+    strands = hairStrands(flow, FLOW_CELL, inside, W, H);
+    strandsSize = [W, H];
+  }
+
+  return {
+    width,
+    height,
+    ids,
+    ink,
+    distance,
+    silhouette,
+    regionData,
+    regionCount: count,
+    form,
+    strands,
+    strandsSize,
+    flow: flowTex,
+    flowSize,
+  };
 }
 
-export const transferables = (b: Baked) => [b.ids.buffer, b.ink.buffer, b.distance.buffer, b.silhouette.buffer, b.regionData.buffer];
+/**
+ * Adds one soft bulge (or dent, for negative lift) shaped like its outline.
+ * Inflated at ¼ size for speed; the profile is squared so it blends in without a crease at its edge.
+ */
+function addVolume(form: Float32Array, inside: Uint8Array, volume: { lift: number; d: string }, ctx: Canvas2D, W: number, H: number) {
+  const Q = 4;
+  const w = Math.ceil(W / Q);
+  const h = Math.ceil(H / Q);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.setTransform(1 / Q, 0, 0, 1 / Q, 0, 0);
+  ctx.fillStyle = '#fff';
+  ctx.fill(new Path2D(volume.d));
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const mask = new Uint8Array(w * h);
+  for (let i = 0; i < mask.length; i++) mask[i] = px[i * 4 + 3] > 127 ? 1 : 0;
+  const u = inflate(mask, w, h); // round cross-section, in ¼-size pixels
+  let peak = 0;
+  for (const v of u) peak = Math.max(peak, v);
+  if (peak === 0) return;
+  const radius = peak * Q; // art units
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (!inside[y * W + x]) continue;
+      // Bilinear sample of the small map.
+      const fx = Math.min(w - 1.001, Math.max(0, (x + 0.5) / Q - 0.5));
+      const fy = Math.min(h - 1.001, Math.max(0, (y + 0.5) / Q - 0.5));
+      const x0 = Math.floor(fx);
+      const y0 = Math.floor(fy);
+      const tx = fx - x0;
+      const ty = fy - y0;
+      const v =
+        (u[y0 * w + x0] * (1 - tx) + u[y0 * w + x0 + 1] * tx) * (1 - ty) + (u[(y0 + 1) * w + x0] * (1 - tx) + u[(y0 + 1) * w + x0 + 1] * tx) * ty;
+      // v is a round cross-section (steep at the edge); (v/peak)⁴ is a bump that starts flat, so no crease.
+      const t = (v / peak) ** 2;
+      const i = y * W + x;
+      form[i] = Math.max(form[i] + volume.lift * radius * INFLATE_HEIGHT * t * t, Math.min(form[i], 1.5));
+    }
+  }
+}
+
+export const transferables = (b: Baked) => [
+  b.ids.buffer,
+  b.ink.buffer,
+  b.distance.buffer,
+  b.silhouette.buffer,
+  b.regionData.buffer,
+  b.form.buffer,
+  b.strands.buffer,
+  b.flow.buffer,
+];

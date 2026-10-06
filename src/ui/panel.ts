@@ -1,13 +1,26 @@
 // Tuning panel (press H to show / hide).
 import GUI from 'lil-gui';
 import { VIEWS, type Params } from '../params.ts';
-import { EVENT_NAMES, EVENT_TYPES, type Director } from '../director/director.ts';
-import { MOODS } from '../director/moods.ts';
+import type { Director } from '../director/director.ts';
+import type { Mood } from '../director/moods.ts';
 
-export function createPanel(params: Params, director: Director, now: () => number): GUI {
+/** Animals to switch between (switching reloads the page with ?animal=). */
+const ANIMALS = { 眼镜王蛇: 'cobra', 老鼠: 'rat' };
+
+export function createPanel(params: Params, director: Director, moods: Mood[], animal: string, now: () => number): GUI {
   const gui = new GUI({ title: '调参 (H)' });
   const invert = (o: Record<string, string>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [v, k]));
 
+  gui
+    .add({ animal }, 'animal', ANIMALS)
+    .name('动物')
+    .onChange((id: string) => {
+      const url = new URL(location.href);
+      url.searchParams.set('animal', id);
+      url.searchParams.delete('mood'); // each animal has its own materials
+      url.searchParams.set('panel', '');
+      location.href = url.href;
+    });
   gui.add(params, 'view', invert(VIEWS)).name('视图');
   gui.add(params, 'paused').name('暂停 (空格)').listen();
   gui.add(params, 'speed', 0, 4, 0.05).name('速度');
@@ -15,12 +28,12 @@ export function createPanel(params: Params, director: Director, now: () => numbe
 
   const direct = gui.addFolder('导演');
   direct
-    .add(params, 'mood', { 自动: -1, ...Object.fromEntries(MOODS.map((m, i) => [m.name, i])) })
+    .add(params, 'mood', { 自动: -1, ...Object.fromEntries(moods.map((m, i) => [m.name, i])) })
     .name('材质')
     .onChange((v: number) => (director.lockedMood = v < 0 ? null : v));
   direct.add({ next: () => director.skipMood(now()) }, 'next').name('▶ 下一种材质 (M)');
   direct.add(params, 'events').name('随机事件').onChange((v: boolean) => (director.eventsEnabled = v));
-  for (const type of EVENT_TYPES) direct.add({ go: () => director.trigger(type, now()) }, 'go').name(`▶ ${EVENT_NAMES[type]}`);
+  for (const type of director.eventTypes) direct.add({ go: () => director.trigger(type, now()) }, 'go').name(`▶ ${director.eventName(type)}`);
 
   const shape = gui.addFolder('立体感');
   shape.add(params, 'relief', 0, 2, 0.05).name('起伏');

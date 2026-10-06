@@ -80,3 +80,27 @@ export function absorbUnlabeled(labels: Int32Array, { width, height }: Raster): 
     frontier = nextFrontier;
   }
 }
+
+/** Grows (or with `erode`, shrinks) the 1-pixels of a mask by a disc of `radius`. */
+export function morph(mask: Uint8Array, { width, height }: Raster, radius: number, erode = false): Uint8Array {
+  const out = new Uint8Array(mask.length);
+  const offsets: [number, number][] = [];
+  for (let dy = -radius; dy <= radius; dy++) for (let dx = -radius; dx <= radius; dx++) if (dx * dx + dy * dy <= radius * radius) offsets.push([dx, dy]);
+  const target = erode ? 0 : 1; // erosion: a pixel survives only if no 0 is within reach
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let hit = false;
+      for (const [dx, dy] of offsets) {
+        const xx = x + dx;
+        const yy = y + dy;
+        const v = xx >= 0 && yy >= 0 && xx < width && yy < height ? mask[yy * width + xx] : 0;
+        if (v === target) {
+          hit = true;
+          break;
+        }
+      }
+      out[y * width + x] = erode ? (hit ? 0 : 1) : hit ? 1 : 0;
+    }
+  }
+  return out;
+}

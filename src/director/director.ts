@@ -4,21 +4,16 @@
 // Layers of change, from fast to slow:
 //   seconds   – dust drifts, the backdrop's mottling slowly moves
 //   ~1 min    – the key light and rim light wander (never from below)
-//   20–90 s   – one quiet event: light sweep, scale ripple, passing shadow, eye glint, dust in the beam
-//   3–5 min   – the snake slowly turns into a new material over ~40 s
+//   20–90 s   – one quiet event: light sweep, ripple (scales lift / wind in the fur), passing shadow,
+//               eye glint, dust in the beam, whisker twitch
+//   3–5 min   – the animal slowly turns into a new material over ~40 s
+// The subject decides which events happen, what they are called, and the list of materials.
 
-import { MOODS, mixMood, type Mood } from './moods.ts';
+import { mixMood, type Mood } from './moods.ts';
+import type { Subject } from '../subjects/subject.ts';
 
-export const EVENT_TYPES = ['sweep', 'ripple', 'shade', 'glint', 'dust'] as const;
+export const EVENT_TYPES = ['sweep', 'ripple', 'shade', 'glint', 'dust', 'whisk'] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
-
-export const EVENT_NAMES: Record<EventType, string> = {
-  sweep: '光带扫过',
-  ripple: '鳞片起伏',
-  shade: '云影',
-  glint: '眼神',
-  dust: '浮尘',
-};
 
 type ScheduledEvent = {
   type: EventType;
@@ -43,6 +38,7 @@ export type FrameState = {
   shade: [number, number, number]; // shadow band position (art units), width, strength
   eyeGlint: number;
   dust: number;
+  whisk: number; // whisker twitch strength 0–1
 };
 
 /** Small seeded RNG (mulberry32). */
@@ -60,27 +56,19 @@ function rng(seed: number) {
 const smooth = (x: number) => x * x * (3 - 2 * x);
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
-/** Where ripples start from (art units): head, hood top, throat, body. */
-const RIPPLE_ORIGINS: [number, number][] = [
-  [740, 200],
-  [520, 120],
-  [560, 420],
-  [300, 600],
-];
-
 const DURATIONS: Record<EventType, [number, number]> = {
   sweep: [6, 10],
   ripple: [7, 11],
   shade: [10, 18],
   glint: [3, 5],
   dust: [12, 20],
+  whisk: [1.5, 3.5],
 };
-const WEIGHTS: Record<EventType, number> = { sweep: 0.3, ripple: 0.2, shade: 0.2, glint: 0.15, dust: 0.15 };
 const MOOD_FADE = 40;
 
 export class Director {
   private events: ScheduledEvent[] = [];
-  private moods: MoodSegment[] = [{ start: -Infinity, mood: 0 }]; // always opens on the natural king cobra
+  private moods: MoodSegment[] = [{ start: -Infinity, mood: 0 }]; // always opens on the first (natural) material
   private nextEvent: () => number;
   private nextMood: () => number;
   private eventCursor = 6; // first event a few seconds after opening
@@ -90,20 +78,32 @@ export class Director {
   lockedMood: number | null = null;
 
   readonly seed: number;
+  private readonly subject: Subject;
+  private readonly moodList: Mood[];
+  /** The events this subject has, in a fixed order. */
+  readonly eventTypes: EventType[];
 
-  constructor(seed: number) {
+  constructor(seed: number, subject: Subject) {
     this.seed = seed;
+    this.subject = subject;
+    this.moodList = subject.moods;
+    this.eventTypes = EVENT_TYPES.filter((type) => subject.events[type]);
     this.nextEvent = rng(seed * 7919 + 1);
     this.nextMood = rng(seed * 104729 + 3);
   }
 
+  eventName(type: EventType): string {
+    return this.subject.events[type]?.name ?? type;
+  }
+
   private pickType(r: number): EventType {
+    const total = this.eventTypes.reduce((sum, type) => sum + this.subject.events[type]!.weight, 0);
     let acc = 0;
-    for (const type of EVENT_TYPES) {
-      acc += WEIGHTS[type];
+    for (const type of this.eventTypes) {
+      acc += this.subject.events[type]!.weight / total;
       if (r < acc) return type;
     }
-    return 'sweep';
+    return this.eventTypes[0];
   }
 
   private makeEvent(type: EventType, start: number, r: () => number): ScheduledEvent {
@@ -112,7 +112,7 @@ export class Director {
       type,
       start,
       duration: lo + (hi - lo) * r(),
-      origin: RIPPLE_ORIGINS[Math.floor(r() * RIPPLE_ORIGINS.length)],
+      origin: this.subject.rippleOrigins[Math.floor(r() * this.subject.rippleOrigins.length)],
       direction: r() < 0.5 ? -1 : 1,
     };
   }
@@ -128,7 +128,7 @@ export class Director {
     while (this.moodCursor <= t + 600) {
       this.moodCursor += 180 + this.nextMood() * 120;
       const previous = this.moods[this.moods.length - 1].mood;
-      const next = (previous + 1 + Math.floor(this.nextMood() * (MOODS.length - 1))) % MOODS.length;
+      const next = (previous + 1 + Math.floor(this.nextMood() * (this.moodList.length - 1))) % this.moodList.length;
       this.moods.push({ start: this.moodCursor, mood: next });
     }
   }
@@ -145,17 +145,17 @@ export class Director {
     this.extend(t);
     const i = this.moods.findIndex((m) => m.start > t);
     const current = this.moods[Math.max(0, i - 1)].mood;
-    const next = (current + 1 + Math.floor(Math.random() * (MOODS.length - 1))) % MOODS.length;
+    const next = (current + 1 + Math.floor(Math.random() * (this.moodList.length - 1))) % this.moodList.length;
     this.moods.splice(Math.max(1, i), 0, { start: t, mood: next });
   }
 
   private moodAt(t: number): Mood {
-    if (this.lockedMood !== null) return MOODS[this.lockedMood];
+    if (this.lockedMood !== null) return this.moodList[this.lockedMood];
     let i = 0;
     while (i + 1 < this.moods.length && this.moods[i + 1].start <= t) i++;
     const seg = this.moods[i];
-    const from = i > 0 ? MOODS[this.moods[i - 1].mood] : MOODS[seg.mood];
-    return mixMood(from, MOODS[seg.mood], smooth(clamp01((t - seg.start) / MOOD_FADE)));
+    const from = i > 0 ? this.moodList[this.moods[i - 1].mood] : this.moodList[seg.mood];
+    return mixMood(from, this.moodList[seg.mood], smooth(clamp01((t - seg.start) / MOOD_FADE)));
   }
 
   frame(t: number): FrameState {
@@ -182,6 +182,7 @@ export class Director {
       shade: [0, 1, 0],
       eyeGlint: 0,
       dust: 0,
+      whisk: 0,
     };
     if (!this.eventsEnabled) return state;
 
@@ -191,7 +192,7 @@ export class Director {
       const p = (t - e.start) / e.duration;
       const envelope = Math.sin(Math.PI * p);
       const travel = e.direction > 0 ? p : 1 - p;
-      state.eventName = EVENT_NAMES[e.type];
+      state.eventName = this.eventName(e.type);
       if (e.type === 'sweep') state.sweep = [-1.4 + travel * 2.8, 0.14, smooth(envelope)];
       if (e.type === 'ripple') {
         state.ripple = [e.origin[0], e.origin[1], p * 1700, 110];
@@ -200,6 +201,7 @@ export class Director {
       if (e.type === 'shade') state.shade = [-700 + travel * 2600, 320, envelope];
       if (e.type === 'glint') state.eyeGlint = envelope;
       if (e.type === 'dust') state.dust = envelope;
+      if (e.type === 'whisk') state.whisk = Math.min(1, Math.sin(Math.PI * p) * 2.5);
     }
     return state;
   }

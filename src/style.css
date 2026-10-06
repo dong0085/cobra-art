@@ -75,3 +75,26 @@ body {
 #fallback .ink {
   fill: #0b0907;
 }
+
+#fallback .fur {
+  fill: #6a5644;
+}
+
+#fallback .skin,
+#fallback .nose {
+  fill: #d49c94;
+}
+
+#fallback .claw {
+  fill: #e8dcc8;
+}
+
+#fallback .whisker {
+  fill: none;
+  stroke: #d8cfc4;
+  stroke-width: 1.5;
+}
+
+#fallback .volume {
+  display: none;
+}

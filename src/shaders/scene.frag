@@ -1,4 +1,4 @@
-// Scene pass: a dark studio with a mottled backdrop, and the cobra as a lit sculpture, in linear HDR colour.
+// Scene pass: a dark studio with a mottled backdrop, and the animal as a lit sculpture, in linear HDR colour.
 // (Prepended at load: #version, precision, common.glsl.)
 
 uniform vec2 uResolution; // render size, px
@@ -16,6 +16,9 @@ uniform sampler2D uInk;
 uniform sampler2D uDistance;
 uniform sampler2D uSilhouette;
 uniform highp sampler2D uRegions;
+uniform highp sampler2D uForm; // overall body height, art units
+uniform sampler2D uStrands; // fine hair strands, 0.5 = flat
+uniform sampler2D uFlow; // fur direction as (cos 2θ, sin 2θ), coherence
 
 // Mood (linear colours)
 uniform vec3 uBackDark;
@@ -23,15 +26,18 @@ uniform vec3 uBackLight;
 uniform vec3 uKey;
 uniform vec3 uRim;
 uniform vec3 uAmbient;
-uniform vec3 uScale;
-uniform vec3 uBand;
-uniform float uBandAmount;
+uniform vec3 uBody;
+uniform vec3 uPattern;
+uniform float uPatternAmount;
 uniform vec3 uBelly;
+uniform vec3 uSkin;
+uniform vec3 uNose;
 uniform vec3 uCavity;
 uniform vec3 uIris;
 uniform float uMetal;
 uniform float uRoughness;
 uniform float uWrap;
+uniform float uFur;
 
 // Director
 uniform vec3 uKeyDir;
@@ -42,6 +48,21 @@ uniform vec3 uSweep; // bar position (reflection x), width, strength
 uniform vec3 uShade; // shadow band position (art units), width, strength
 uniform float uEyeGlint;
 uniform float uDust;
+
+// Subject (art units unless noted)
+uniform vec3 uKeyPool; // where the key light is aimed, and its radius
+uniform vec3 uEye; // centre and radius (radius 0: use the eye block's size)
+uniform vec4 uFade; // fade-to-dark: x from .x to .y, for y from .z to .w
+uniform float uFadeOn;
+uniform vec4 uGround; // floor shadow: centre, radius
+uniform float uGroundOn;
+uniform int uPatternMode; // 0: cross bands, 1: lighter belly inside uBellyZone
+uniform vec3 uBellyZone;
+uniform float uBevelAll; // 1: bevel every block; 0: only small parts (eye, nose, claws)
+uniform float uStrandDepth;
+uniform float uInkDarken;
+uniform float uDarkFloorOnBody;
+uniform float uShadowSoftness; // 1: crisp scale shadows; higher for big smooth bodies
 
 // Layout, px from top-left
 uniform vec2 uSpot; // centre of the spotlight on the backdrop
@@ -58,16 +79,16 @@ uniform float uDustAmount;
 
 out vec4 outColor;
 
-const int SCALE = 0;
-const int VENTRAL = 1;
+// Materials (region data row 0, .z)
+const int BODY = 0; // scales or fur
+const int BELLY = 1;
 const int HEAD = 2;
 const int EYE = 3;
-const int NOSTRIL = 4;
-const vec2 EYE_CENTER = vec2(706.0, 205.0);
-const float FORM_RADIUS = 46.0; // art units: how wide each body part's rounded edge is
+const int NOSE = 4;
+const int SKIN = 5;
+const int CLAW = 6;
 const float KEY_POWER = 2.6;
 const float RIM_POWER = 2.0;
-const vec2 KEY_POOL = vec2(660.0, 260.0); // the key light is aimed at the head
 
 // ---------- Lookups ----------
 
@@ -98,31 +119,51 @@ float blockDistance(vec2 p) {
 
 // ---------- Shape: height of the surface, in art units ----------
 
-/** How strongly the passing ripple lifts the scale centred here (0–1). */
-float rippleAt(vec2 center) {
-  float d = distance(center, uRipple.xy);
+/** How strongly the passing ripple lifts the surface at q (0–1). */
+float rippleAt(vec2 q) {
+  float d = distance(q, uRipple.xy);
   return exp(-pow((d - uRipple.z) / uRipple.w, 2.0)) * uRippleStrength;
 }
 
-float heightAt(vec2 p) {
+/** Fine hair strands at p: −0.5 … 0.5. */
+float strandAt(vec2 p) {
+  return texture(uStrands, p / uArtSize).r - 0.5;
+}
+
+/** `detail`: include hair strands and pen grooves (normals want them; shadows don't). */
+float heightAt(vec2 p, bool detail) {
   int id = blockAt(p);
   if (id == 0) return 0.0;
-  float dist = blockDistance(p);
-  float maxD = max(region(id, 1).x / uBakeScale, 0.5);
+  vec4 r0 = region(id, 0);
+  int kind = int(r0.z + 0.5);
 
-  // Each body part is a rounded column: steep at its edge, flat across the middle.
-  float x = clamp(formDistance(p) / FORM_RADIUS, 0.0, 1.0);
-  float form = sqrt(1.0 - (1.0 - x) * (1.0 - x)) * FORM_RADIUS * 0.75;
+  // The body's overall shape, baked: rounded columns (cobra) or a soft inflated balloon (rat).
+  float h = texture(uForm, p / uArtSize).r;
 
-  // Each scale: a rounded bevel at its rim plus a gentle dome.
-  float b = clamp(dist / uBevel, 0.0, 1.0);
-  float bevel = (1.0 - (1.0 - b) * (1.0 - b)) * uBevel * 0.9;
-  float bulge = clamp(dist / maxD, 0.0, 1.0);
-  float dome = (1.0 - (1.0 - bulge) * (1.0 - bulge)) * min(maxD, 14.0) * 0.3;
-  if (uRippleStrength > 0.0) dome *= 1.0 + 1.6 * rippleAt(region(id, 0).xy * uArtSize);
+  // Each block: a rounded bevel at its rim plus a gentle dome (scales; on furry animals only small hard parts).
+  if (uBevelAll > 0.5 || kind == EYE || kind == NOSE || kind == CLAW) {
+    float dist = blockDistance(p);
+    float maxD = max(region(id, 1).x / uBakeScale, 0.5);
+    float b = clamp(dist / uBevel, 0.0, 1.0);
+    float bevel = (1.0 - (1.0 - b) * (1.0 - b)) * uBevel * 0.9;
+    float bulge = clamp(dist / maxD, 0.0, 1.0);
+    float dome = (1.0 - (1.0 - bulge) * (1.0 - bulge)) * min(maxD, 14.0) * 0.3;
+    if (uRippleStrength > 0.0 && uStrandDepth == 0.0) dome *= 1.0 + 1.6 * rippleAt(r0.xy * uArtSize);
+    h += bevel + dome;
+  }
+  h *= uRelief;
+  if (!detail) return h;
 
-  float groove = texture(uInk, p / uArtSize).r * 1.5;
-  return (form + bevel + dome) * uRelief - groove;
+  if (uStrandDepth > 0.0 && (kind == BODY || kind == BELLY || kind == HEAD)) {
+    // Wind ruffles the fur as it passes.
+    float lift = uRippleStrength > 0.0 ? 1.0 + 2.0 * rippleAt(p) : 1.0;
+    h += strandAt(p) * uStrandDepth * lift * uRelief;
+  }
+  return h - texture(uInk, p / uArtSize).r * 1.5;
+}
+
+float heightAt(vec2 p) {
+  return heightAt(p, true);
 }
 
 vec3 normalAt(vec2 p, float e) {
@@ -138,15 +179,15 @@ float selfShadow(vec2 p, float h0, vec3 L) {
   float lit = 1.0;
   for (int i = 1; i <= 9; i++) {
     float d = float(i * i) * 0.9; // 0.9 … 73 art units, dense near the start
-    float above = heightAt(p + dir * d) - (h0 + d * rise);
-    lit = min(lit, clamp(1.0 - above / (0.6 + d * 0.12), 0.0, 1.0));
+    float above = heightAt(p + dir * d, false) - (h0 + d * rise);
+    lit = min(lit, clamp(1.0 - above / ((0.6 + d * 0.12) * uShadowSoftness), 0.0, 1.0));
   }
   return lit;
 }
 
 /** How much key light reaches p (art units): a pool around the head, and the passing cloud. */
 float keyShade(vec2 p) {
-  float pool = mix(0.25, 1.0, exp(-pow(distance(p, KEY_POOL) / 760.0, 2.0)));
+  float pool = mix(0.25, 1.0, exp(-pow(distance(p, uKeyPool.xy) / uKeyPool.z, 2.0)));
   float x = dot(p, normalize(vec2(1.0, 0.35)));
   return pool * (1.0 - 0.7 * uShade.z * exp(-pow((x - uShade.x) / uShade.y, 2.0)));
 }
@@ -186,7 +227,17 @@ vec3 backdrop(vec2 s, vec2 p) {
   float shadow = smoothstep(-40.0, 6.0, formDistance(p - offset)) * 0.7 * uShadows;
   light *= 1.0 - shadow;
 
+  // Contact shadow on the floor under the animal.
+  if (uGroundOn > 0.5) {
+    vec2 g = (p - uGround.xy) / uGround.zw;
+    light *= 1.0 - 0.85 * exp(-dot(g, g) * 2.0) * uShadows;
+  }
+
   vec3 col = uBackDark * (1.0 + 0.4 * mottle) + uBackLight * max(light, 0.0);
+  if (uGroundOn > 0.5) {
+    vec2 g = (p - uGround.xy) / (uGround.zw * vec2(0.8, 0.5));
+    col *= 1.0 - 0.6 * exp(-dot(g, g) * 2.0) * uShadows; // darkest right under the feet
+  }
   return col;
 }
 
@@ -224,7 +275,7 @@ float dust(vec2 s) {
   return sum;
 }
 
-// ---------- The snake ----------
+// ---------- The animal ----------
 
 /** Physically based-ish GGX specular for one light. */
 vec3 specular(vec3 n, vec3 L, vec3 V, vec3 f0, float rough) {
@@ -242,47 +293,87 @@ vec3 specular(vec3 n, vec3 L, vec3 V, vec3 f0, float rough) {
   return min(D * vis, 40.0) * F * NoL;
 }
 
-vec3 shadeSnake(int id, vec2 p) {
+/**
+ * Fur sheen (Kajiya–Kay): a highlight stretched across the strands, one white and one tinted.
+ * `strand` (−0.5…0.5) tilts each hair a little, so the highlight breaks up into hairs instead of patches.
+ */
+vec3 furSheen(vec3 n, vec3 T, vec3 L, vec3 V, vec3 base, float strand) {
+  vec3 H = normalize(L + V);
+  float th1 = dot(normalize(T + n * (0.1 + strand * 0.9)), H);
+  float th2 = dot(normalize(T - n * (0.2 - strand * 0.6)), H);
+  float s1 = pow(sqrt(max(1.0 - th1 * th1, 0.0)), 36.0);
+  float s2 = pow(sqrt(max(1.0 - th2 * th2, 0.0)), 10.0);
+  float NoL = clamp(dot(n, L) * 0.7 + 0.3, 0.0, 1.0);
+  return (vec3(s1) * 0.12 + base * s2 * 0.45) * NoL;
+}
+
+/** Fur direction at p as a 3D tangent (screen axes); .w: how clear the direction is (0–1). */
+vec4 furTangent(vec2 p, vec3 n) {
+  vec4 f = texture(uFlow, p / uArtSize);
+  float angle = 0.5 * atan(f.g * 2.0 - 1.0, f.r * 2.0 - 1.0);
+  vec2 d = mix(vec2(0.0, 1.0), vec2(cos(angle), sin(angle)), smoothstep(0.05, 0.3, f.b)); // unclear areas: hair hangs down
+  vec3 T = normalize(vec3(d.x, -d.y, 0.0));
+  return vec4(normalize(T - n * dot(n, T)), smoothstep(0.05, 0.35, f.b));
+}
+
+vec3 shadeAnimal(int id, vec2 p) {
   vec4 r0 = region(id, 0);
   vec4 r1 = region(id, 1);
   int kind = int(r0.z + 0.5);
   vec2 center = r0.xy * uArtSize;
   float seed = r0.w;
   float ink = texture(uInk, p / uArtSize).r;
+  float strand = uStrandDepth > 0.0 ? strandAt(p) : 0.0;
 
-  // Colour: cross bands along the body, wobbly like the real snake's, nudged per scale.
-  vec2 c = mix(center, p, 0.6); // mostly smooth, so bands run across scales
-  float warp = snoise(vec3(c * 0.004, 3.1));
-  float bands = smoothstep(0.6, 0.92, sin((c.y * 0.9 + c.x * 0.45) * 0.036 + warp * 1.6) * 0.5 + 0.5);
-  vec3 base = mix(uScale, uBand, bands * uBandAmount) * (0.88 + 0.24 * seed);
+  // Colour.
+  vec3 base;
+  if (uPatternMode == 0) {
+    // Cross bands along the body, wobbly like the real snake's, nudged per scale.
+    vec2 c = mix(center, p, 0.6); // mostly smooth, so bands run across scales
+    float warp = snoise(vec3(c * 0.004, 3.1));
+    float bands = smoothstep(0.6, 0.92, sin((c.y * 0.9 + c.x * 0.45) * 0.036 + warp * 1.6) * 0.5 + 0.5);
+    base = mix(uBody, uPattern, bands * uPatternAmount) * (0.88 + 0.24 * seed);
+  } else {
+    // Darker back, lighter belly, with lighter and darker hairs mixed in.
+    float belly = 1.0 - smoothstep(uBellyZone.z * 0.45, uBellyZone.z, distance(p, uBellyZone.xy));
+    base = mix(uBody, uBelly, belly) * (1.0 + strand * 0.7 * uFur);
+  }
   float metal = clamp(uMetal + uMetalBias, 0.0, 1.0);
-  float rough = uRoughness * (0.85 + 0.3 * seed);
+  float rough = uRoughness * (uBevelAll > 0.5 ? 0.85 + 0.3 * seed : 1.0); // scales vary; fur blocks must match
   vec3 emissive = vec3(0.0);
   float glint = 1.0;
+  float fur = kind == BODY || kind == BELLY || kind == HEAD ? uFur * step(0.001, uStrandDepth) : 0.0;
 
-  if (kind == VENTRAL) {
+  if (kind == BELLY) {
     base = uBelly * (0.9 + 0.1 * seed);
     rough *= 0.8;
   } else if (kind == HEAD) {
     base = mix(base, uBelly, 0.12);
   } else if (kind == EYE) {
     // Round pupil, iris fading darker toward the rim, a wet glassy surface.
-    float r = distance(p, EYE_CENTER) / max(r1.x / uBakeScale, 1.0);
+    float radius = uEye.z > 0.0 ? uEye.z : max(r1.x / uBakeScale, 1.0);
+    float r = distance(p, uEye.xy) / radius;
     base = mix(uIris * 1.3, uIris * 0.2, smoothstep(0.35, 0.95, r));
     base = mix(vec3(0.004), base, smoothstep(0.3, 0.38, r));
     metal = 0.0;
     rough = 0.05;
     glint = 1.0 + uEyeGlint * 5.0;
     emissive = uIris * uEyeGlint * 2.0 * smoothstep(0.3, 0.6, r) * (1.0 - smoothstep(0.8, 1.0, r));
-  } else if (kind == NOSTRIL) {
-    base = vec3(0.005);
-    metal = 0.0;
+  } else if (kind == NOSE) {
+    base = uNose;
+    rough *= 0.5;
+  } else if (kind == SKIN) {
+    base = uSkin * (0.92 + 0.16 * seed);
+    rough = mix(rough, 0.35, 1.0 - metal);
+  } else if (kind == CLAW) {
+    base = mix(uSkin, vec3(0.85, 0.8, 0.7), 0.5 * (1.0 - metal));
+    rough *= 0.5;
   }
   rough = clamp(rough, 0.05, 1.0);
 
   float e = max(0.5, 0.6 / uArtScale);
   vec3 n = normalAt(p, e);
-  float h0 = heightAt(p);
+  float h0 = heightAt(p, false);
   vec3 V = vec3(0.0, 0.0, 1.0);
   vec3 Lk = normalize(uKeyDir);
   vec3 Lr = normalize(uRimDir);
@@ -292,9 +383,10 @@ vec3 shadeSnake(int id, vec2 p) {
   float bd = blockDistance(p);
   float fd = formDistance(p);
   float ao = mix(0.4, 1.0, smoothstep(0.0, 3.5, bd)) * mix(0.5, 1.0, smoothstep(0.0, 28.0, fd));
+  if (uBevelAll < 0.5) ao = mix(0.5, 1.0, smoothstep(0.0, 28.0, fd)) * (1.0 + strand * 0.6 * fur); // no gaps between fur blocks
   float lit = mix(1.0, selfShadow(p, h0, Lk), uShadows) * keyShade(p);
 
-  // Diffuse, with "wrap" letting light soak around the form (jade, porcelain).
+  // Diffuse, with "wrap" letting light soak around the form (jade, porcelain, fur).
   float w = uWrap;
   float diffKey = max((dot(n, Lk) + w) / (1.0 + w), 0.0) / (1.0 + w);
   float diffRim = max(dot(n, Lr), 0.0);
@@ -305,17 +397,22 @@ vec3 shadeSnake(int id, vec2 p) {
 
   vec3 spec = specular(n, Lk, V, f0, rough) * uKey * KEY_POWER * lit * glint
     + specular(n, Lr, V, f0, rough) * uRim * RIM_POWER;
+  if (fur > 0.0) {
+    vec4 T = furTangent(p, n);
+    vec3 sheen = furSheen(n, T.xyz, Lk, V, base, strand) * uKey * KEY_POWER * lit + furSheen(n, T.xyz, Lr, V, base, strand) * uRim * RIM_POWER * 0.8;
+    spec = mix(spec, sheen * T.w, fur);
+  }
 
   float NoV = max(n.z, 0.0);
   vec3 fresnel = f0 + (1.0 - f0) * pow(1.0 - NoV, 5.0) * (1.0 - rough);
-  vec3 reflection = studio(reflect(-V, n), rough) * fresnel * ao * mix(1.0, lit, 0.5);
+  vec3 reflection = studio(reflect(-V, n), rough) * fresnel * ao * mix(1.0, lit, 0.5) * (1.0 - 0.8 * fur);
 
   vec3 col = diffuse + (spec * uSpecular + reflection) * mix(1.0, ao, 0.6);
-  // Translucent materials glow faintly at their edges when back-lit.
+  // Translucent materials and fur glow faintly at their edges when back-lit.
   col += base * uRim * uWrap * pow(1.0 - NoV, 2.0) * 0.6;
 
-  // Deep in the gaps between scales: the cavity colour (verdigris on bronze, cobalt on porcelain).
-  float cavity = clamp(ink * 0.8 + (1.0 - smoothstep(0.0, 2.0, bd)) * 0.35, 0.0, 1.0);
+  // Deep in the gaps between scales or strokes: the cavity colour (verdigris on bronze, cobalt on porcelain).
+  float cavity = clamp(ink * uInkDarken + (1.0 - smoothstep(0.0, 2.0, bd)) * 0.35 * uBevelAll, 0.0, 1.0);
   vec3 cavityLit = uCavity * (uAmbient * 1.5 + uKey * 0.35 * lit);
   col = mix(col, cavityLit, cavity);
 
@@ -339,12 +436,18 @@ void main() {
       if (uView == 1) c = hsv(hash11(float(id) * 1.618), 0.55, 0.9);
       if (uView == 2) c = vec3(clamp(blockDistance(p) / max(r1.x / uBakeScale, 0.5), 0.0, 1.0));
       if (uView == 3) {
-        c = kind == SCALE ? vec3(0.42, 0.7, 0.79) : kind == VENTRAL ? vec3(0.95, 0.76, 0.31)
-          : kind == HEAD ? vec3(0.88, 0.48, 0.37) : kind == EYE ? vec3(0.5, 0.7, 0.6) : vec3(0.6, 0.36, 0.9);
+        c = kind == BODY ? vec3(0.42, 0.7, 0.79) : kind == BELLY ? vec3(0.95, 0.76, 0.31)
+          : kind == HEAD ? vec3(0.88, 0.48, 0.37) : kind == EYE ? vec3(0.5, 0.7, 0.6)
+          : kind == SKIN ? vec3(0.96, 0.65, 0.63) : kind == CLAW ? vec3(0.91, 0.77, 0.42) : vec3(0.6, 0.36, 0.9);
       }
-      if (uView == 4) c = hsv(fract(r2.x / 3.14159265), 0.7, 0.4 + 0.6 * r2.y);
+      if (uView == 4) {
+        // Stroke direction: the fur map where there is one, otherwise each block's own direction.
+        vec4 f = texture(uFlow, p / uArtSize);
+        c = uStrandDepth > 0.0 ? hsv(fract(atan(f.g * 2.0 - 1.0, f.r * 2.0 - 1.0) / 6.2831853), 0.7, 0.3 + 0.7 * f.b)
+          : hsv(fract(r2.x / 3.14159265), 0.7, 0.4 + 0.6 * r2.y);
+      }
       if (uView == 5) c = normalAt(p, max(0.5, 0.6 / uArtScale)) * 0.5 + 0.5;
-      if (uView == 6) c = vec3(heightAt(p) / 45.0);
+      if (uView == 6) c = vec3(heightAt(p, true) / (uStrandDepth > 0.0 ? 160.0 : 45.0));
       c = c * c; // the post pass converts back to sRGB
     }
     outColor = vec4(c, 1.0);
@@ -355,17 +458,19 @@ void main() {
   float shaft = beam(s);
   col += uKey * 0.035 * shaft * uSpotAmount * keyShade(p);
 
+  // The floor of the room falls into darkness.
+  float floorShade = mix(1.0, 0.35, smoothstep(H * 0.72, H * 1.05, s.y));
+  col *= floorShade;
+
   if (id != 0) {
-    // The body cut off at the lower left sinks into the dark.
-    float fade = mix(1.0, smoothstep(40.0, 460.0, p.x), smoothstep(900.0, 1250.0, p.y));
-    col = mix(col, shadeSnake(id, p), fade);
+    vec3 animal = shadeAnimal(id, p) * mix(1.0, floorShade, uDarkFloorOnBody);
+    // A body cut off by the frame sinks into the dark.
+    float fade = uFadeOn > 0.5 ? mix(1.0, smoothstep(uFade.x, uFade.y, p.x), smoothstep(uFade.z, uFade.w, p.y)) : 1.0;
+    col = mix(col, animal, fade);
   }
 
   // Dust in the air, lit mostly inside the light shaft.
   col += uKey * dust(s) * (0.15 + 1.4 * shaft) * (0.35 + 1.2 * uDust) * uDustAmount * 0.6;
-
-  // The floor of the room falls into darkness.
-  col *= mix(1.0, 0.35, smoothstep(H * 0.72, H * 1.05, s.y));
 
   outColor = vec4(col, 1.0);
 }
